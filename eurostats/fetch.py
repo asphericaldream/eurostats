@@ -8,6 +8,7 @@ stats). Files already on disk are skipped, so re-running only fetches what
 is missing.
 """
 import argparse
+import os
 import time
 from pathlib import Path
 
@@ -15,7 +16,10 @@ import pandas as pd
 from euroleague_api.EuroLeagueData import EuroLeagueData
 from euroleague_api.team_stats import TeamStats
 
-RAW_DIR = Path(__file__).resolve().parent.parent / "data" / "raw"
+RAW_DIR = Path(os.environ.get(
+    "EUROSTATS_RAW_DIR",
+    Path(__file__).resolve().parent.parent / "data" / "raw",
+))
 COMPETITION = "E"
 PAUSE_SECONDS = 2.0
 
