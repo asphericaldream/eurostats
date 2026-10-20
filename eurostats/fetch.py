@@ -1,7 +1,7 @@
 """Download EuroLeague season data and cache it under data/raw/.
 
 Usage:
-    python -m eurostats.fetch --from 2007 --to 2025
+    python -m eurostats.fetch --from 2000 --to 2025
 
 Each season costs three requests (results, traditional and advanced team
 stats). Files already on disk are skipped, so re-running only fetches what
@@ -37,6 +37,8 @@ def fetch_season(season: int) -> None:
         if path.exists():
             continue
         df = job()
+        # The feed includes club logo URLs; the site never shows logos.
+        df = df.drop(columns=[c for c in df.columns if "imageUrl" in c])
         df.insert(0, "season", season)
         path.parent.mkdir(parents=True, exist_ok=True)
         df.to_parquet(path, index=False)
@@ -53,7 +55,7 @@ def load_raw(kind: str) -> pd.DataFrame:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--from", dest="start", type=int, default=2007)
+    parser.add_argument("--from", dest="start", type=int, default=2000)
     parser.add_argument("--to", dest="end", type=int, default=2025)
     args = parser.parse_args()
     for season in range(args.start, args.end + 1):
