@@ -18,6 +18,16 @@ python -m eurostats.fetch_games      # raw JSON per game into data/games/, resum
 python -m eurostats.flatten_games    # CSV tables into data/csv/
 ```
 
+For club data (names per season, city, arena history, founding year, owners):
+
+```bash
+python -m eurostats.fetch_clubs      # CSV tables into data/clubs/csv/
+```
+
+Founding year, owners and map coordinates come from Wikidata (CC0, credit
+"Wikidata"). Matches are found by name search, so check `club_wikidata.csv`
+and fix a wrong match in `eurostats/club_wikidata_ids.csv`.
+
 ## Data
 
 Data comes from EuroLeague's public stats feed (`api-live.euroleague.net`)
