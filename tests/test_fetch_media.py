@@ -31,10 +31,15 @@ def test_image_file_is_stable_per_url():
 def test_download_saves_images_and_records_status(tmp_path, monkeypatch):
     monkeypatch.setattr(fetch_media, "MEDIA_DIR", tmp_path)
     monkeypatch.setattr(fetch_media, "PAUSE_SECONDS", 0)
+    monkeypatch.setattr(fetch_media, "SOURCES_CSV", tmp_path.parent / "sources.csv")
+    base = {"subject_type": "person", "subject_code": "1", "club_code": "BAR",
+            "licence": "private", "credit": "Photo: EL", "wikidata_id": "",
+            "status": "", "downloaded_at": ""}
     rows = [
-        {"url": "https://cdn/a.png", "kind": "crest", "local_path": "crests/BAR/a.png", "status": ""},
-        {"url": "https://cdn/b.png", "kind": "headshot", "local_path": "people/1/b.png", "status": ""},
-        {"url": "https://cdn/c.png", "kind": "action", "local_path": "people/1/c.png", "status": ""},
+        dict(base, url="https://cdn/a.png", kind="crest", subject_type="club",
+             subject_code="BAR", local_path="crests/BAR/a.png"),
+        dict(base, url="https://cdn/b.png", kind="headshot", local_path="people/1/b.png"),
+        dict(base, url="https://cdn/c.png", kind="action", local_path="people/1/c.png"),
     ]
     fetch_media.write_csv("images.csv", rows)
     session = FakeSession({
@@ -50,3 +55,13 @@ def test_download_saves_images_and_records_status(tmp_path, monkeypatch):
         status = {row["url"]: row["status"] for row in csv.DictReader(f)}
     assert status == {"https://cdn/a.png": "ok", "https://cdn/b.png": "HTTP 404",
                       "https://cdn/c.png": ""}
+
+    with open(tmp_path.parent / "sources.csv", newline="") as f:
+        sources = list(csv.DictReader(f))
+    assert [row["file"] for row in sources] == [f"{tmp_path.name}/crests/BAR/a.png"]
+    assert sources[0]["source_keys"] == "club=BAR"
+
+    # A second run downloads nothing and adds no duplicate source rows.
+    fetch_media.download_images({"crest"})
+    with open(tmp_path.parent / "sources.csv", newline="") as f:
+        assert len(list(csv.DictReader(f))) == 1

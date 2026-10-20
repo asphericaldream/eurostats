@@ -11,7 +11,10 @@ Steps:
               the licence and the file it will be saved as.
     download  saves every image in images.csv under data/media/crests/<club>/
               and data/media/people/<person>/ and records the result in
-              the status column. Images are hosted on media-cdn.cortextech.io
+              the status column. Each saved file also gets a row in the
+              shared sources.csv (next to data/media/): source URL, download
+              time, licence, credit line and source keys (club and player
+              codes). Images are hosted on media-cdn.cortextech.io
               and media-cdn.incrowdsports.com.
 
 Every request is cached on disk, so both steps can be stopped and resumed.
@@ -27,6 +30,7 @@ import hashlib
 import json
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
@@ -37,6 +41,9 @@ MEDIA_DIR = Path(os.environ.get(
     "EUROSTATS_MEDIA_DIR",
     Path(__file__).resolve().parent.parent / "data" / "media",
 ))
+# One row per downloaded file, shared with the other downloads.
+SOURCES_CSV = Path(os.environ.get("EUROSTATS_SOURCES_CSV", MEDIA_DIR.parent / "sources.csv"))
+SOURCE_FIELDS = ["file", "source_url", "downloaded_at", "licence", "credit", "source_keys"]
 PAUSE_SECONDS = 0.5
 SEASONS = "https://api-live.euroleague.net/v2/competitions/{comp}/seasons/{comp}{season}"
 META_URLS = {
@@ -47,6 +54,8 @@ USER_AGENT = "eurostats/0.1 (non-commercial EuroLeague fan project)"
 CREST_RIGHTS = "the club (trademark); hosted by Euroleague Basketball"
 PHOTO_RIGHTS = "Euroleague Basketball and its photographers; player image rights"
 LICENCE = "all rights reserved; private use only"
+FEED_LICENCE = "Euroleague Basketball terms of use; private non-commercial use"
+FEED_CREDIT = "Data: Euroleague Basketball"
 
 
 def raw_path(kind: str, season: int) -> Path:
@@ -66,6 +75,38 @@ def get_with_retry(session: requests.Session, url: str, **kwargs) -> requests.Re
     raise SystemExit(f"giving up on {url}")
 
 
+def now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def record_sources(rows: list[dict]) -> None:
+    """Append rows to sources.csv, skipping files it already lists.
+
+    Other downloads write to the same file, so it is read again right before
+    appending and only new rows are added.
+    """
+    if not rows:
+        return
+    known = set()
+    if SOURCES_CSV.exists():
+        with open(SOURCES_CSV, newline="", encoding="utf-8") as f:
+            known = {row["file"] for row in csv.DictReader(f)}
+    new = [row for row in rows if row["file"] not in known]
+    if not new:
+        return
+    SOURCES_CSV.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not SOURCES_CSV.exists() or SOURCES_CSV.stat().st_size == 0
+    with open(SOURCES_CSV, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=SOURCE_FIELDS)
+        if write_header:
+            writer.writeheader()
+        writer.writerows(new)
+
+
+def source_file(path: Path) -> str:
+    return Path(os.path.relpath(path, SOURCES_CSV.parent)).as_posix()
+
+
 def fetch_json(session: requests.Session, kind: str, season: int):
     path = raw_path(kind, season)
     if not path.exists():
@@ -77,6 +118,14 @@ def fetch_json(session: requests.Session, kind: str, season: int):
         with gzip.open(tmp, "wb") as f:
             f.write(response.content)
         tmp.replace(path)
+        record_sources([{
+            "file": source_file(path),
+            "source_url": url,
+            "downloaded_at": now(),
+            "licence": FEED_LICENCE,
+            "credit": FEED_CREDIT,
+            "source_keys": f"season={COMPETITION}{season}",
+        }])
         time.sleep(PAUSE_SECONDS)
     with gzip.open(path, "rt", encoding="utf-8") as f:
         data = json.load(f)
@@ -109,7 +158,7 @@ def list_images(start: int, end: int) -> None:
     session = requests.Session()
     images = {}
 
-    def add_image(url, kind, subject_type, code, name, club, season, folder, rights):
+    def add_image(url, kind, subject_type, code, name, club, season, folder, rights, credit):
         if not url:
             return
         entry = images.setdefault(url, {
@@ -125,8 +174,11 @@ def list_images(start: int, end: int) -> None:
             "source": "api-live.euroleague.net",
             "rights_holder": rights,
             "licence": LICENCE,
+            "credit": credit,
+            "wikidata_id": "",
             "local_path": image_file(folder, code, url),
             "status": "",
+            "downloaded_at": "",
         })
         entry["first_season"] = min(entry["first_season"], season)
         entry["last_season"] = max(entry["last_season"], season)
@@ -136,7 +188,8 @@ def list_images(start: int, end: int) -> None:
         for club in fetch_json(session, "clubs", season):
             add_image((club.get("images") or {}).get("crest"), "crest", "club",
                       club["code"], club.get("name"), club["code"], season,
-                      "crests", CREST_RIGHTS)
+                      "crests", CREST_RIGHTS,
+                      f"{club.get('name')} crest, via Euroleague Basketball")
         for entry in fetch_json(session, "people", season):
             person = entry["person"]
             club = (entry.get("club") or {}).get("code")
@@ -144,7 +197,8 @@ def list_images(start: int, end: int) -> None:
             photos.update(entry.get("images") or {})
             for kind, url in photos.items():
                 image = add_image(url, kind, "person", person["code"], person.get("name"),
-                                  club, season, "people", PHOTO_RIGHTS)
+                                  club, season, "people", PHOTO_RIGHTS,
+                                  "Photo: Euroleague Basketball")
                 if image:
                     image["role"] = entry.get("typeName")
         print(f"listed {COMPETITION}{season}: {len(images)} images so far", flush=True)
@@ -152,10 +206,27 @@ def list_images(start: int, end: int) -> None:
     # Keep download results from an earlier run so a rebuild does not lose them.
     previous = {}
     if (MEDIA_DIR / "images.csv").exists():
-        previous = {row["url"]: row["status"] for row in read_csv("images.csv")}
+        previous = {row["url"]: row for row in read_csv("images.csv")}
     for url, entry in images.items():
-        entry["status"] = previous.get(url, "")
+        for field in ("status", "downloaded_at", "wikidata_id"):
+            entry[field] = previous.get(url, {}).get(field, "")
     write_csv("images.csv", list(images.values()))
+
+
+def image_source(row: dict) -> dict:
+    keys = f"{row['subject_type']}={row['subject_code']}"
+    if row["club_code"] and row["subject_type"] == "person":
+        keys += f"; club={row['club_code']}"
+    if row.get("wikidata_id"):
+        keys += f"; wikidata={row['wikidata_id']}"
+    return {
+        "file": source_file(MEDIA_DIR / row["local_path"]),
+        "source_url": row["url"],
+        "downloaded_at": row["downloaded_at"],
+        "licence": row["licence"],
+        "credit": row["credit"],
+        "source_keys": keys,
+    }
 
 
 def download_images(kinds: set[str]) -> None:
@@ -163,6 +234,13 @@ def download_images(kinds: set[str]) -> None:
     session = requests.Session()
     session.headers["User-Agent"] = USER_AGENT
     todo = [row for row in rows if row["kind"] in kinds]
+    saved = []
+
+    def save_progress():
+        write_csv("images.csv", rows)
+        record_sources([image_source(row) for row in saved])
+        saved.clear()
+
     for count, row in enumerate(todo, 1):
         path = MEDIA_DIR / row["local_path"]
         if path.exists():
@@ -175,14 +253,16 @@ def download_images(kinds: set[str]) -> None:
             tmp.write_bytes(response.content)
             tmp.replace(path)
             row["status"] = "ok"
+            row["downloaded_at"] = now()
+            saved.append(row)
         else:
             row["status"] = f"HTTP {response.status_code}"
             print(f"failed {row['url']}: {row['status']}")
         time.sleep(PAUSE_SECONDS)
         if count % 200 == 0:
             print(f"{count}/{len(todo)} images", flush=True)
-            write_csv("images.csv", rows)
-    write_csv("images.csv", rows)
+            save_progress()
+    save_progress()
 
 
 def main() -> None:
