@@ -22,14 +22,20 @@ Tables from the EuroLeague feed (2000-01 on), one row per ...:
                                registration dates
 
 Tables from Wikipedia and Wikidata (all years, 1957-58 on), one row per ...:
-    titles.csv                 season: champion, runner-up, final score, venue
-    final_four_places.csv      club in a Final Four or final tournament: place
-    awards.csv                 award given to a player or coach in a season
-                               (MVP, Final Four MVP, All-EuroLeague teams,
-                               Coach of the Year, Rising Star)
+    titles.csv                 final: champion, runner-up, the score of each
+                               game (* marks the home team), host city;
+                               2000-01 has two (SuproLeague and Euroleague)
+    final_four_places.csv      club in a Final Four tournament: place 1 to 4
+                               (1966-67 to 1967-68, then 1987-88 on)
+    awards.csv                 award to a player or coach in a season:
+                               mvp, final_four_mvp, all_euroleague (detail
+                               says first or second team), coach_of_the_year,
+                               rising_star, and from the finals list
+                               finals_mvp, finals_top_scorer (detail: points)
+                               and champion_coach
     wiki_tables.csv            every cell of every table on those pages, as
                                downloaded, for anything the tables above miss
-    wikidata_player_codes.csv  Wikidata item to EuroLeague player code
+    wikidata_codes.csv         Wikidata item to EuroLeague player or coach code
 
 Club and player codes are the feed's, the same as in the box score tables.
 Wikipedia rows carry the linked page's Wikidata ID (QID) and, for players,
@@ -313,10 +319,18 @@ def table_grids(html: str) -> list:
     return grids
 
 
+def section_row(row: list) -> bool:
+    """A row that is one cell across the whole table, naming what follows."""
+    return len(row) > 1 and len({id(c) for c in row}) == 1
+
+
 def split_header(grid: list) -> tuple:
-    """Header names (joined across header rows) and the data rows."""
+    """Header names (joined across header rows) and the data rows.
+
+    Section rows stay in the data rows; see section_row.
+    """
     head = []
-    while grid and all(c["header"] for c in grid[0]):
+    while grid and all(c["header"] for c in grid[0]) and not (head and section_row(grid[0])):
         head.append(grid[0])
         grid = grid[1:]
     width = max((len(r) for r in head + grid), default=0)
@@ -354,45 +368,43 @@ def wiki_link_titles() -> set:
 
 def qid_map() -> dict:
     """Linked page title -> Wikidata ID, following redirects."""
-    titles = {}
-    for path in sorted(WIKI_DIR.glob("pageprops_*.json.gz")):
-        query = load(path).get("query", {})
-        qids = {p["title"]: p.get("pageprops", {}).get("wikibase_item")
-                for p in query.get("pages", [])}
-        for step in ("normalized", "redirects"):
-            for r in query.get(step, []):
-                titles[r["from"]] = r["to"]
-        titles.update({t: t for t in qids})
-        for source, target in list(titles.items()):
-            while target in titles and titles[target] != target:
-                target = titles[target]
-            titles[source] = qids.get(target, titles[source])
-    return {t: q for t, q in titles.items() if q and q.startswith("Q")}
+    qids = {}
+    for path in sorted(WIKIDATA_DIR.glob("article_qids_*.json.gz")):
+        for row in load(path)["results"]["bindings"]:
+            qids[row["title"]["value"]] = row["item"]["value"].rsplit("/", 1)[-1]
+    for path in sorted((WIKI_DIR / "links").glob("*.json.gz")):
+        link = load(path)
+        if link.get("wikibase_item"):
+            qids.setdefault(link["link"], link["wikibase_item"])
+    return {t: q for t, q in qids.items() if q and q.startswith("Q")}
 
 
-def wikidata_player_codes(tables: dict) -> dict:
-    """QID -> feed player code, from Wikidata's EuroLeague player ID."""
+def wikidata_codes(tables: dict) -> dict:
+    """QID -> {"player": feed code, "coach": feed code}, from Wikidata's
+    euroleague.net player and coach IDs."""
     path = WIKIDATA_DIR / "euroleague_properties.json.gz"
     if not path.exists():
         return {}
-    codes = {}
+    codes = defaultdict(dict)
     for prop in load(path)["results"]["bindings"]:
         pid = prop["property"]["value"].rsplit("/", 1)[-1]
-        label = prop["label"]["value"]
+        label = prop["label"]["value"].lower()
+        kind = "player" if "player" in label else "coach" if "coach" in label else None
         values = WIKIDATA_DIR / f"{pid}_values.json.gz"
-        if "player" not in label.lower() or not values.exists():
+        if not kind or not values.exists():
             continue
         for row in load(values)["results"]["bindings"]:
             qid = row["item"]["value"].rsplit("/", 1)[-1]
-            # euroleague.net player IDs are the feed code, sometimes with
-            # the live feed's leading "P".
+            # euroleague.net IDs are the feed code in lower case, sometimes
+            # with the live feed's leading "P".
             value = row["value"]["value"].strip()
             code = value[1:] if re.fullmatch(r"P\w+", value) and len(value) > 3 else value
-            tables["wikidata_player_codes"].append({
+            code = code.upper()
+            tables["wikidata_codes"].append({
                 "qid": qid, "name": row.get("itemLabel", {}).get("value"),
-                "player_code": code, "wikidata_property": pid,
+                "kind": kind, "code": code, "wikidata_property": pid,
                 "wikidata_value": value})
-            codes.setdefault(qid, code)
+            codes[qid].setdefault(kind, code)
     return codes
 
 
@@ -404,20 +416,34 @@ def column(names: list, *words, avoid=()) -> int | None:
     return None
 
 
+MARKERS = re.compile(r"\s*(\(\d+(?:x|×)?\)|[*†‡§^#+]+|\(\d+×\))\s*")
+
+
+def clean(text: str | None) -> str | None:
+    """Drop the footnote marks and (2×) counts tables add to names."""
+    if not text:
+        return None
+    text = MARKERS.sub(" ", text).strip(" –—")
+    return " ".join(text.split()) or None
+
+
 def cell_link(row, i, qids):
+    """A cell's name, the page it links to and that page's Wikidata ID."""
     if i is None or i >= len(row):
         return None, None, None
     cell = row[i]
-    title = cell["links"][0] if cell["links"] else None
     # Flag links come first in some cells; the name is the last link.
     named = [t for t in cell["links"] if not t.lower().startswith(("flag of", "list of"))]
-    title = named[-1] if named else title
-    return cell["text"] or None, title, qids.get(title)
+    title = named[-1] if named else None
+    text = clean(cell["text"])
+    if text and text.lower().startswith(("n/a", "cancelled", "not awarded")):
+        return None, None, None
+    return text, title, qids.get(title)
 
 
 def wiki_tables(tables: dict) -> None:
     qids = qid_map()
-    player_codes = wikidata_player_codes(tables)
+    codes = wikidata_codes(tables)
     for key in WIKI_PAGES:
         page = wiki_page(key)
         if not page:
@@ -434,68 +460,113 @@ def wiki_tables(tables: dict) -> None:
                         "links": "|".join(cell["links"]) or None,
                         "qids": "|".join(filter(None, (qids.get(x) for x in cell["links"]))) or None,
                     })
-            awards_from_table(key, page, names, rows, qids, player_codes, tables)
-
-
-def awards_from_table(key, page, names, rows, qids, player_codes, tables) -> None:
-    season_col = column(names, "season", "year", "edition")
-    if season_col is None:
-        return
-    if key == "finals" or key == "final_four":
-        champ = column(names, "champion", "winner", "first")
-        runner = column(names, "runner", "second", "finalist")
-        third = column(names, "third")
-        fourth = column(names, "fourth")
-        score = column(names, "score", "result")
-        venue = column(names, "venue", "arena", "host", "location", "city")
-        for row in rows:
-            season = parse_season(row[season_col]["text"]) if season_col < len(row) else None
-            if season is None:
+            season_col = next((i for i, n in enumerate(names)
+                               if n.split(" / ")[0].lower() in ("season", "seasons", "year")), None)
+            if season_col is None:
                 continue
-            if key == "finals" and champ is not None:
-                c_text, c_title, c_qid = cell_link(row, champ, qids)
-                r_text, r_title, r_qid = cell_link(row, runner, qids)
-                v_text, _, v_qid = cell_link(row, venue, qids)
-                tables["titles"].append({
-                    "season": season, "champion": c_text, "champion_qid": c_qid,
-                    "runner_up": r_text, "runner_up_qid": r_qid,
-                    "final_score": cell_link(row, score, qids)[0],
-                    "venue": v_text, "venue_qid": v_qid,
-                    "source": page["title"]})
-            for place, col in ((1, champ), (2, runner), (3, third), (4, fourth)):
-                text, title, qid = cell_link(row, col, qids)
-                if text:
-                    tables["final_four_places"].append({
-                        "season": season, "place": place, "club": text,
-                        "club_qid": qid, "source": page["title"]})
-        return
-    # Award pages: every linked person in a row is an award winner; the
-    # column header says which team (All-EuroLeague first or second team).
-    club_col = column(names, "team", "club", avoid=("first", "second", "all-"))
+            args = (page, names, rows, season_col, qids, tables)
+            if key == "finals":
+                if column(names, "runner") is not None:
+                    titles_from_table(*args)
+                else:
+                    awards_from_table(key, *args, codes)
+            elif key == "final_four":
+                if column(names, "fourth") is not None:
+                    places_from_table(*args)
+            else:
+                awards_from_table(key, *args, codes)
+
+
+def season_rows(rows: list, season_col: int):
+    """(season, section, row) for each data row; section rows set section."""
+    section = None
     for row in rows:
-        season = parse_season(row[season_col]["text"]) if season_col < len(row) else None
-        if season is None:
+        if section_row(row):
+            section = row[0]["text"]
             continue
-        club_text, _, club_qid = cell_link(row, club_col, qids)
-        seen = set()
-        for c, cell in enumerate(row):
-            if c in (season_col, club_col) or id(cell) in seen:
-                continue
-            seen.add(id(cell))
-            header = names[c] if c < len(names) else ""
-            low = header.lower()
-            if any(w in low for w in ("nationality", "country", "position", "ref", "note")):
-                continue
-            for title in cell["links"]:
-                qid = qids.get(title)
-                if title.lower().startswith(("flag of", "list of")) or not qid:
-                    continue
-                tables["awards"].append({
-                    "award": key, "season": season, "detail": header or None,
-                    "name": title, "qid": qid,
-                    "player_code": player_codes.get(qid),
-                    "club": club_text, "club_qid": club_qid,
+        season = parse_season(row[season_col]["text"]) if season_col < len(row) else None
+        if season is not None:
+            yield season, section, row
+
+
+def titles_from_table(page, names, rows, season_col, qids, tables) -> None:
+    """The champions list: one row per final (two for the split 2000-01)."""
+    champ = column(names, "champion")
+    runner = column(names, "runner")
+    venue = column(names, "venue", "host", "location", "city")
+    games = [i for i, n in enumerate(names) if "game" in n.lower() or n.lower().endswith("final")]
+    shared = Counter()
+    for season, section, row in season_rows(rows, season_col):
+        c_text, c_title, c_qid = cell_link(row, champ, qids)
+        if not c_text:
+            continue
+        r_text, r_title, r_qid = cell_link(row, runner, qids)
+        scores = [re.sub(r"\s*([–-])\s*", "–", row[i]["text"]) for i in games if i < len(row)]
+        scores = [x for x in scores if re.search(r"\d", x)]
+        # 2000-01 had two competitions, so two rows share one season cell
+        # that links both seasons' pages.
+        season_cell = row[season_col]
+        competitions = [t for t in season_cell["links"] if not re.search(r"final", t, re.IGNORECASE)]
+        k = shared[id(season_cell)]
+        shared[id(season_cell)] += 1
+        tables["titles"].append({
+            "season": season,
+            "competition": competitions[min(k, len(competitions) - 1)] if competitions else section,
+            "champion": c_text, "champion_wiki": c_title, "champion_qid": c_qid,
+            "runner_up": r_text, "runner_up_wiki": r_title, "runner_up_qid": r_qid,
+            "games": len(scores), "final_score": "; ".join(scores) or None,
+            "host": cell_link(row, venue, qids)[0],
+            "source": page["title"]})
+
+
+def places_from_table(page, names, rows, season_col, qids, tables) -> None:
+    """The Final Four list: places 1 to 4 of each Final Four tournament."""
+    cols = {1: column(names, "champion"), 2: column(names, "runner"),
+            3: column(names, "third"), 4: column(names, "fourth")}
+    host = column(names, "host", "city")
+    for season, section, row in season_rows(rows, season_col):
+        for place, col in cols.items():
+            text, title, qid = cell_link(row, col, qids)
+            if text:
+                tables["final_four_places"].append({
+                    "season": season, "competition": section, "place": place,
+                    "club": text, "club_wiki": title, "club_qid": qid,
+                    "host_city": cell_link(row, host, qids)[0],
                     "source": page["title"]})
+
+
+# Column headers naming an award winner, and the award to file them under
+# when it differs from the page's. The club column follows the winner.
+WINNER_COLUMNS = {"player": None, "head coach": None, "final four mvp": None,
+                  "rising star": None, "top scorer": "finals_top_scorer",
+                  "mvp": "finals_mvp", "champion coach": "champion_coach"}
+
+
+def awards_from_table(key, page, names, rows, season_col, qids, tables, codes) -> None:
+    """Award pages, and the finals page's top scorer, MVP and coach list."""
+    last = [n.split(" / ")[-1].strip().lower() for n in names]
+    winners = [i for i, n in enumerate(last) if n in WINNER_COLUMNS]
+    for season, _, row in season_rows(rows, season_col):
+        for i in winners:
+            name, title, qid = cell_link(row, i, qids)
+            if not name:
+                continue
+            club = next((j for j in range(i + 1, len(last))
+                         if j in winners or last[j] in ("club", "team")), None)
+            club = None if club in winners else club
+            club_name, club_title, club_qid = cell_link(row, club, qids)
+            award = (WINNER_COLUMNS[last[i]] if key == "finals" else None) or key
+            group = names[i].split(" / ")[0] if " / " in names[i] else None
+            points = None
+            if award == "finals_top_scorer" and i + 2 < len(row):
+                points = row[i + 2]["text"]
+            code = codes.get(qid, {})
+            tables["awards"].append({
+                "award": award, "season": season, "detail": group or points,
+                "name": name, "wiki": title, "qid": qid,
+                "player_code": code.get("player"), "coach_code": code.get("coach"),
+                "club": club_name, "club_wiki": club_title, "club_qid": club_qid,
+                "source": page["title"]})
 
 
 def write_csv(path: Path, rows: list) -> None:
@@ -537,7 +608,7 @@ def main() -> None:
     for name in ("season_phases", "season_rounds", "standings", "season_finish",
                  "final_four_games", "player_bios", "player_registrations",
                  "titles", "final_four_places", "awards", "wiki_tables",
-                 "wikidata_player_codes"):
+                 "wikidata_codes"):
         write_csv(args.out / f"{name}.csv", tables[name])
 
 

@@ -8,10 +8,16 @@ Sources:
     feed   api-live.euroleague.net: each season's phases, rounds, the
            standings after the last round of every group phase, and the
            people registered with each club (players' bios).
-    wiki   en.wikipedia.org: the tables on the champions, Final Four and
-           award pages, plus the Wikidata ID of every page they link to.
-           query.wikidata.org: every Wikidata item with a EuroLeague player
-           ID, so award winners can be matched to box score player codes.
+    wiki   en.wikipedia.org: the champions, Final Four and award pages.
+           query.wikidata.org: the Wikidata ID of every page those tables
+           link to, and every Wikidata item with a EuroLeague player or
+           coach ID, so award winners can be matched to feed codes.
+
+Wikipedia's API (w/api.php) answers 429 to busy shared addresses such as
+cloud machines, so pages are read as ordinary article pages and linked
+titles are looked up on Wikidata's query service instead. A linked title
+Wikidata doesn't know (usually a redirect) is opened as an article page to
+read the Wikidata ID of the page it redirects to.
 
 Responses are stored untouched as gzipped JSON under data/raw/history/ and
 skipped when already on disk, so the download can be stopped and resumed.
@@ -23,8 +29,10 @@ when, the score) are taken from its tables, never prose.
 import argparse
 import csv
 import gzip
+import hashlib
 import json
 import os
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,7 +58,7 @@ FEED_URLS = {
     "standings": FEED + "/v3/competitions/{comp}/seasons/{comp}{season}/rounds/{round}/basicstandings",
 }
 
-WIKIPEDIA = "https://en.wikipedia.org/w/api.php"
+WIKIPEDIA = "https://en.wikipedia.org/wiki/"
 WIKIDATA_SPARQL = "https://query.wikidata.org/sparql"
 # English Wikipedia pages whose tables hold the facts we want.
 WIKI_PAGES = {
@@ -68,6 +76,13 @@ EUROLEAGUE_PROPERTIES = """
 SELECT ?property ?label WHERE {
   ?property a wikibase:Property ; rdfs:label ?label .
   FILTER(LANG(?label) = "en" && CONTAINS(LCASE(?label), "euroleague"))
+}"""
+# Wikidata IDs of English Wikipedia articles, by exact title.
+ARTICLE_QIDS = """
+SELECT ?title ?item WHERE {
+  VALUES ?title { %s }
+  ?article schema:about ?item ; schema:isPartOf <https://en.wikipedia.org/> ;
+           schema:name ?title .
 }"""
 PROPERTY_VALUES = """
 SELECT ?item ?itemLabel ?value WHERE {
@@ -93,11 +108,13 @@ def load(path: Path):
         return json.load(f)
 
 
-def get_json(session: requests.Session, url: str, params: dict | None = None):
+def get_json(session: requests.Session, url: str, params: dict | None = None,
+             parse=None):
     """GET with a pause after every request and patient retries.
 
     The feed refuses requests when several downloads run at once, so a 429
     or 5xx waits and tries again instead of giving up. Returns None on 404.
+    parse turns the response into the data to keep (default: its JSON).
     """
     for attempt in range(6):
         try:
@@ -110,17 +127,17 @@ def get_json(session: requests.Session, url: str, params: dict | None = None):
                 return None
             if response.status_code < 400:
                 time.sleep(PAUSE_SECONDS)
-                return response.json()
+                return parse(response) if parse else response.json()
             print(f"retry {url}: HTTP {response.status_code}")
         time.sleep(10 * 2 ** attempt)
     raise SystemExit(f"giving up on {url}")
 
 
-def cached(session, name: str, url: str, params: dict | None = None):
+def cached(session, name: str, url: str, params: dict | None = None, parse=None):
     path = raw_path(name)
     if path.exists():
         return load(path)
-    data = get_json(session, url, params)
+    data = get_json(session, url, params, parse)
     if data is not None:
         save(path, data)
         log_download(path, response_url(url, params))
@@ -167,33 +184,72 @@ def fetch_feed(session: requests.Session, seasons: range) -> None:
         print(f"done {name}: phases {sorted(group_phases)} have standings", flush=True)
 
 
+def article(response: requests.Response) -> dict:
+    """An article page's content and the facts MediaWiki puts in its head.
+
+    Kept in the shape of the API's action=parse answer, so pages saved
+    either way read the same.
+    """
+    html = response.text
+
+    def setting(name):
+        match = re.search(rf'"{name}":("(?:[^"\\]|\\.)*"|\d+)', html)
+        return json.loads(match.group(1)) if match else None
+
+    start = html.find('<div id="mw-content-text"')
+    end = html.find('<div class="printfooter"', start)
+    return {"parse": {
+        "title": (setting("wgPageName") or "").replace("_", " "),
+        "revid": setting("wgRevisionId"),
+        "wikibase_item": setting("wgWikibaseItemId"),
+        "text": html[start:end if end > 0 else None] if start >= 0 else html,
+    }}
+
+
+def article_url(title: str) -> str:
+    return WIKIPEDIA + requests.utils.quote(title.replace(" ", "_"), safe="")
+
+
+def sparql_string(text: str) -> str:
+    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"@en'
+
+
 def fetch_wiki(session: requests.Session) -> None:
     for key, title in WIKI_PAGES.items():
-        page = cached(session, f"wikipedia/{key}", WIKIPEDIA, {
-            "action": "parse", "page": title, "prop": "text|revid",
-            "redirects": 1, "format": "json", "formatversion": 2,
-        })
+        page = cached(session, f"wikipedia/{key}", article_url(title), parse=article)
         if page is None or "parse" not in page:
-            print(f"no Wikipedia page for {title!r}: {page and page.get('error')}")
+            print(f"no Wikipedia page for {title!r}", flush=True)
             continue
-        print(f"saved Wikipedia {page['parse']['title']} (revision {page['parse']['revid']})")
+        print(f"saved Wikipedia {page['parse']['title']} (revision {page['parse']['revid']})",
+              flush=True)
 
     # Wikidata IDs of every page linked from those tables, 50 titles a call.
     from eurostats.flatten_history import wiki_link_titles
     titles = sorted(wiki_link_titles())
+    found = {}
     for start in range(0, len(titles), 50):
-        cached(session, f"wikipedia/pageprops_{start // 50:03d}", WIKIPEDIA, {
-            "action": "query", "prop": "pageprops", "ppprop": "wikibase_item",
-            "redirects": 1, "titles": "|".join(titles[start:start + 50]),
-            "format": "json", "formatversion": 2,
-        })
-    print(f"looked up Wikidata IDs for {len(titles)} linked pages")
+        chunk = titles[start:start + 50]
+        data = cached(session, f"wikidata/article_qids_{start // 50:03d}", WIKIDATA_SPARQL, {
+            "query": ARTICLE_QIDS % " ".join(map(sparql_string, chunk)), "format": "json"})
+        for row in data["results"]["bindings"]:
+            found[row["title"]["value"]] = row["item"]["value"].rsplit("/", 1)[-1]
+    print(f"Wikidata knows {len(found)} of {len(titles)} linked pages", flush=True)
+
+    # The rest are mostly redirects: the article page names the target's ID.
+    missing = [t for t in titles if t not in found]
+    for n, title in enumerate(missing, 1):
+        digest = hashlib.sha1(title.encode()).hexdigest()[:12]
+        cached(session, f"wikipedia/links/{digest}", article_url(title), parse=lambda r, t=title: {
+            "link": t, **{k: v for k, v in article(r)["parse"].items() if k != "text"}})
+        if n % 25 == 0:
+            print(f"opened {n} of {len(missing)} redirected pages", flush=True)
 
     properties = cached(session, "wikidata/euroleague_properties", WIKIDATA_SPARQL,
                         {"query": EUROLEAGUE_PROPERTIES, "format": "json"})
     for row in properties["results"]["bindings"]:
         pid = row["property"]["value"].rsplit("/", 1)[-1]
-        print(f"Wikidata {pid}: {row['label']['value']}")
+        print(f"Wikidata {pid}: {row['label']['value']}", flush=True)
         cached(session, f"wikidata/{pid}_values", WIKIDATA_SPARQL,
                {"query": PROPERTY_VALUES % pid, "format": "json"})
 
