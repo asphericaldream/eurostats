@@ -18,6 +18,14 @@ python -m eurostats.fetch_games      # raw JSON per game into data/games/, resum
 python -m eurostats.flatten_games    # CSV tables into data/csv/
 ```
 
+For titles, awards, season formats, standings and player bios:
+
+```bash
+python -m eurostats.fetch_history feed   # api-live.euroleague.net, 2000-01 on
+python -m eurostats.fetch_history wiki   # en.wikipedia.org + query.wikidata.org, 1957-58 on
+python -m eurostats.flatten_history      # CSV tables into data/csv/
+```
+
 ## Data
 
 Data comes from EuroLeague's public stats feed (`api-live.euroleague.net`)
@@ -34,6 +42,9 @@ What the feed has (checked October 2026):
   which is not reachable from the cloud environment yet.
 - Team names in season totals are today's club names, not the name the club
   played under that season. The results file keeps the historical names.
+
+Titles, Final Four places and awards before 2000 come from English Wikipedia
+tables (facts only; Wikipedia text is CC BY-SA) and Wikidata (CC0).
 
 This is a non-commercial fan project. Statistics belong to Euroleague
 Basketball; no logos or photos are used.
