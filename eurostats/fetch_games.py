@@ -30,7 +30,8 @@ GAMES_DIR = Path(os.environ.get(
     "EUROSTATS_GAMES_DIR",
     Path(__file__).resolve().parent.parent / "data" / "games",
 ))
-PAUSE_SECONDS = 0.5
+PAUSE_SECONDS = 1.5
+RATE_LIMIT_WAITS = [60, 120, 300, 600, 900, 900]
 V2 = "https://api-live.euroleague.net/v2/competitions/{comp}/seasons/{comp}{season}/games/{game}"
 V3 = "https://api-live.euroleague.net/v3/competitions/{comp}/seasons/{comp}{season}/games/{game}"
 LIVE = "https://live.euroleague.net/api/{endpoint}?gamecode={game}&seasoncode={comp}{season}"
@@ -87,13 +88,14 @@ def main() -> None:
         codes = sorted(games["gameCode"].astype(int).unique())
         for game in codes:
             for kind in kinds:
-                for attempt in range(4):
+                # The feed answers 429 when asked too fast; back off for minutes.
+                for wait in RATE_LIMIT_WAITS:
                     try:
                         requested = fetch_game(session, kind, season, game)
                         break
                     except requests.RequestException as error:
-                        print(f"retry {kind} {season} {game}: {error}")
-                        time.sleep(5 * 2 ** attempt)
+                        print(f"retry {kind} {season} {game} in {wait}s: {error}", flush=True)
+                        time.sleep(wait)
                 else:
                     raise SystemExit(f"giving up on {kind} {season} game {game}")
                 if requested:
