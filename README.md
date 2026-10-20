@@ -11,6 +11,13 @@ python -m eurostats.fetch --from 2000 --to 2025   # downloads into data/raw/
 python -m eurostats.app                           # opens http://localhost:8080
 ```
 
+For per-game detail (box scores for every player in every game since 2000-01):
+
+```bash
+python -m eurostats.fetch_games      # raw JSON per game into data/games/, resumable
+python -m eurostats.flatten_games    # CSV tables into data/csv/
+```
+
 ## Data
 
 Data comes from EuroLeague's public stats feed (`api-live.euroleague.net`)

@@ -47,3 +47,29 @@ def test_team_trends_uses_league_totals():
     assert row["three_point_pct"] == pytest.approx(150 / 420 * 100)
     assert row["effective_fg_pct"] == pytest.approx((530 + 75) / 1200 * 100)
     assert row["label"] == "2007-08"
+
+
+def test_box_score_rows_split_players_and_teams():
+    from eurostats.flatten_games import box_score_rows
+
+    def side(club, player):
+        return {
+            "coach": {"code": "C" + club, "name": "COACH"},
+            "team": {"totalRebounds": 2},
+            "total": {"points": 80},
+            "players": [{
+                "player": {"person": {"code": player, "name": "NAME"},
+                           "club": {"code": club}, "positionName": "Guard"},
+                "stats": {"points": 10, "dorsal": "4", "startFive": True},
+            }],
+        }
+
+    tables = {"team_games": [], "player_games": [], "players": {}, "coaches": {}}
+    box_score_rows(2007, 1, {"local": side("OLY", "P1"), "road": side("BAS", "P2")}, tables)
+
+    assert [t["club_code"] for t in tables["team_games"]] == ["OLY", "BAS"]
+    assert tables["team_games"][0]["points"] == 80
+    assert tables["team_games"][0]["team_only_totalRebounds"] == 2
+    assert tables["player_games"][1]["player_code"] == "P2"
+    assert tables["player_games"][1]["is_home"] is False
+    assert set(tables["players"]) == {"P1", "P2"}
