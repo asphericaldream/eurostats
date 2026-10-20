@@ -95,11 +95,14 @@ def game_rows(season: int, code: int, game: dict, tables: dict) -> None:
     tables["games"].append(row)
 
 
-def box_score_rows(season: int, code: int, box: dict, tables: dict) -> None:
+def box_score_rows(season: int, code: int, box: dict, tables: dict,
+                   clubs: dict | None = None) -> None:
+    """clubs maps "local"/"road" to club codes, for box scores with no players."""
     for side in ("local", "road"):
         team = box[side]
         players = team["players"]
-        club = players[0]["player"]["club"]["code"] if players else None
+        club = (players[0]["player"]["club"]["code"] if players
+                else (clubs or {}).get(side))
         coach = team.get("coach") or {}
         if coach.get("code"):
             tables["coaches"][coach["code"]] = {
@@ -233,10 +236,13 @@ def main() -> None:
         season = int(season_dir.name[len(COMPETITION):])
         codes = sorted({int(p.name[:4]) for p in season_dir.glob("*.json.gz")})
         for code in codes:
+            clubs = None
             if (season_dir / f"{code:04d}_game.json.gz").exists():
-                game_rows(season, code, load_game("game", season, code), tables)
+                game = load_game("game", season, code)
+                game_rows(season, code, game, tables)
+                clubs = {side: game[side]["club"]["code"] for side in ("local", "road")}
             if (season_dir / f"{code:04d}_stats.json.gz").exists():
-                box_score_rows(season, code, load_game("stats", season, code), tables)
+                box_score_rows(season, code, load_game("stats", season, code), tables, clubs)
             for kind, rows in (("pbp", play_rows), ("shots", shot_rows)):
                 path = season_dir / f"{code:04d}_{kind}.json.gz"
                 if not path.exists():
