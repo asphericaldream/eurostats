@@ -18,6 +18,17 @@ python -m eurostats.fetch_games      # raw JSON per game into data/games/, resum
 python -m eurostats.flatten_games    # CSV tables into data/csv/
 ```
 
+For club crests and player and coach photos (private use only, see
+[docs/image-rights.md](docs/image-rights.md)):
+
+```bash
+python -m eurostats.fetch_media list       # images.csv: every image URL with its credit
+python -m eurostats.fetch_media download   # saves them under data/media/, resumable
+```
+
+The image hosts (`media-cdn.cortextech.io`, `media-cdn.incrowdsports.com`) are
+not reachable from the cloud environment, so the download runs locally.
+
 ## Data
 
 Data comes from EuroLeague's public stats feed (`api-live.euroleague.net`)
