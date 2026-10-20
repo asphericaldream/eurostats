@@ -12,7 +12,7 @@ Sources:
     raw game files            the arena each home game was played in, so arena
                               history comes from what actually happened
                               (run eurostats.fetch_games first; optional)
-    www.wikidata.org          founding year, owners, home venue, city (CC0,
+    query.wikidata.org        founding year, owners, home venue, city (CC0,
                               credit "Wikidata")
 
 Responses are stored untouched as gzipped JSON under data/clubs/raw/; files
@@ -53,7 +53,6 @@ RAW_DIR = Path(os.environ.get("EUROSTATS_CLUBS_DIR", ROOT / "data" / "clubs" / "
 OVERRIDES = Path(__file__).resolve().parent / "club_wikidata_ids.csv"
 PAUSE_SECONDS = 0.5
 API = "https://api-live.euroleague.net/v2"
-WIKIDATA_API = "https://www.wikidata.org/w/api.php"
 WIKIDATA_SPARQL = "https://query.wikidata.org/sparql"
 # Wikimedia asks every client to say who it is.
 USER_AGENT = "eurostats/0.1 (non-commercial EuroLeague fan project; github.com/asphericaldream/eurostats)"
@@ -202,17 +201,36 @@ def load_overrides() -> dict:
                 if row.get("wikidata_id")}
 
 
+SEARCH = """
+SELECT ?item ?label ?desc WHERE {
+  SERVICE wikibase:mwapi {
+    bd:serviceParam wikibase:endpoint "www.wikidata.org"; wikibase:api "Search";
+                    mwapi:srsearch "%s haswbstatement:P641=Q5372"; mwapi:srlimit "10".
+    ?item wikibase:apiOutputItem mwapi:title. ?ordinal wikibase:apiOrdinal true.
+  }
+  ?item wdt:P31/wdt:P279* wd:Q13393265 .
+  OPTIONAL { ?item rdfs:label ?label FILTER(LANG(?label) = "en") }
+  OPTIONAL { ?item schema:description ?desc FILTER(LANG(?desc) = "en") }
+} ORDER BY ?ordinal
+"""
+NOT_FIRST_TEAM = ("women", "reserve", "youth", "academy", "junior", " b team")
+
+
 def search_wikidata(session, code: str, names: list):
-    """Return the first search hit described as a basketball club."""
+    """Return the best search hit that is a men's first basketball team.
+
+    The search runs on query.wikidata.org (Wikidata's own search, limited to
+    items whose sport is basketball), because the www.wikidata.org API
+    rate-limits shared cloud addresses.
+    """
     for n, name in enumerate(names):
+        text = name.replace('"', " ").replace("\\", " ")
         data = cached_get(session, RAW_DIR / "wikidata" / f"search_{code}_{n}.json.gz",
-                          WIKIDATA_API, params={
-                              "action": "wbsearchentities", "search": name,
-                              "language": "en", "type": "item", "limit": 10,
-                              "format": "json"})
-        for hit in (data or {}).get("search", []):
-            if "basketball" in (hit.get("description") or "").lower():
-                return hit["id"], f"search: {name}"
+                          WIKIDATA_SPARQL, params={"query": SEARCH % text, "format": "json"})
+        for b in (data or {}).get("results", {}).get("bindings", []):
+            text = " ".join(b.get(k, {}).get("value", "") for k in ("label", "desc")).lower()
+            if not any(word in text for word in NOT_FIRST_TEAM):
+                return b["item"]["value"].rsplit("/", 1)[-1], f"search: {name}"
     return None, None
 
 
