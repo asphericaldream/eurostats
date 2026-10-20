@@ -28,3 +28,37 @@ def results_trends(results: pd.DataFrame) -> pd.DataFrame:
     trends["home_win_pct"] = trends["home_win_pct"] * 100
     trends["label"] = trends["season"].map(season_label)
     return trends
+
+
+def team_trends(traditional: pd.DataFrame) -> pd.DataFrame:
+    """Pace, shot mix and efficiency for each season, league-wide.
+
+    Expects the accumulated team totals (all phases) the fetch step saves as
+    team_traditional. Rates are computed from league totals rather than by
+    averaging team percentages, so every possession counts the same.
+    """
+    totals = traditional.groupby("season")[[
+        "minutesPlayed", "pointsScored",
+        "twoPointersMade", "twoPointersAttempted",
+        "threePointersMade", "threePointersAttempted",
+        "freeThrowsAttempted", "offensiveRebounds", "turnovers",
+    ]].sum()
+
+    fga = totals["twoPointersAttempted"] + totals["threePointersAttempted"]
+    fgm = totals["twoPointersMade"] + totals["threePointersMade"]
+    # Standard possession estimate (Oliver): FGA + 0.44 FTA - OREB + TOV.
+    possessions = (fga + 0.44 * totals["freeThrowsAttempted"]
+                   - totals["offensiveRebounds"] + totals["turnovers"])
+
+    trends = pd.DataFrame({
+        # minutesPlayed is team minutes (40 per regulation game), so this is
+        # possessions per team per 40 minutes and handles overtime.
+        "pace": possessions / totals["minutesPlayed"] * 40,
+        "offensive_rating": totals["pointsScored"] / possessions * 100,
+        "three_point_rate": totals["threePointersAttempted"] / fga * 100,
+        "three_point_pct": totals["threePointersMade"] / totals["threePointersAttempted"] * 100,
+        "effective_fg_pct": (fgm + 0.5 * totals["threePointersMade"]) / fga * 100,
+        "free_throw_rate": totals["freeThrowsAttempted"] / fga * 100,
+    }).reset_index()
+    trends["label"] = trends["season"].map(season_label)
+    return trends
